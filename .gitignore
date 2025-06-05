@@ -30,3 +30,20 @@
 *.exe
 *.out
 *.app
+
+## ESP-IDF
+
+# Project-specific
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults
+sdkconfig.defaults.old
+sdkconfig.defaults.old.old
+
+# General
+.vscode/
+.DS_Store
+.idea/
+.vscode/
