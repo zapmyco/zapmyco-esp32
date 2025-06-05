@@ -42,11 +42,10 @@ extern "C"
 #include "bsp_board.h"               // 板级支持包，INMP441麦克风驱动
 #include "esp_log.h"                 // ESP日志系统
 #include "assets/voices/welcome.h"   // 欢迎音频数据文件
-#include "assets/voices/light_on.h"  // 开灯音频数据文件
-#include "assets/voices/light_off.h" // 关灯音频数据文件
-#include "assets/voices/byebye.h"    // 再见音频数据文件
 #include "driver/gpio.h"             // GPIO驱动
 }
+
+#include "commands/command_manager.h"
 
 static const char *TAG = "语音识别"; // 日志标签
 
@@ -59,28 +58,6 @@ typedef enum
     STATE_WAITING_WAKEUP = 0,  // 等待唤醒词
     STATE_WAITING_COMMAND = 1, // 等待命令词
 } system_state_t;
-
-// 命令词ID定义（对应commands_cn.txt中的ID）
-#define COMMAND_TURN_OFF_LIGHT 308 // "帮我关灯"
-#define COMMAND_TURN_ON_LIGHT 309  // "帮我开灯"
-#define COMMAND_BYE_BYE 314        // "拜拜"
-
-// 命令词配置结构体
-typedef struct
-{
-    int command_id;
-    const char *pinyin;
-    const char *description;
-} command_config_t;
-
-// 自定义命令词列表
-static const command_config_t custom_commands[] = {
-    {COMMAND_TURN_ON_LIGHT, "bang wo kai deng", "帮我开灯"},
-    {COMMAND_TURN_OFF_LIGHT, "bang wo guan deng", "帮我关灯"},
-    {COMMAND_BYE_BYE, "bai bai", "拜拜"},
-};
-
-#define CUSTOM_COMMANDS_COUNT (sizeof(custom_commands) / sizeof(custom_commands[0]))
 
 // 全局变量
 static system_state_t current_state = STATE_WAITING_WAKEUP;
@@ -119,142 +96,15 @@ static void init_led(void)
     ESP_LOGI(TAG, "✓ 外接LED初始化成功，初始状态：关闭");
 }
 
-static void led_turn_on(void)
-{
-    gpio_set_level(LED_GPIO, 1);
-    ESP_LOGI(TAG, "外接LED点亮");
-}
 
-static void led_turn_off(void)
-{
-    gpio_set_level(LED_GPIO, 0);
-    ESP_LOGI(TAG, "外接LED熄灭");
-}
-
-/**
- * @brief 配置自定义命令词
- *
- * 该函数会清除现有命令词，然后添加自定义命令词列表中的所有命令
- *
- * @param multinet 命令词识别接口指针
- * @param mn_model_data 命令词模型数据指针
- * @return esp_err_t
- *         - ESP_OK: 配置成功
- *         - ESP_FAIL: 配置失败
- */
-static esp_err_t configure_custom_commands(esp_mn_iface_t *multinet, model_iface_data_t *mn_model_data)
-{
-    ESP_LOGI(TAG, "开始配置自定义命令词...");
-
-    // 首先尝试从sdkconfig加载默认命令词配置
-    esp_mn_commands_update_from_sdkconfig(multinet, mn_model_data);
-
-    // 清除现有命令词，重新开始
-    esp_mn_commands_clear();
-
-    // 分配命令词管理结构
-    esp_err_t ret = esp_mn_commands_alloc(multinet, mn_model_data);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "命令词管理结构分配失败: %s", esp_err_to_name(ret));
-        return ESP_FAIL;
-    }
-
-    // 添加自定义命令词
-    int success_count = 0;
-    int fail_count = 0;
-
-    for (int i = 0; i < CUSTOM_COMMANDS_COUNT; i++)
-    {
-        const command_config_t *cmd = &custom_commands[i];
-
-        ESP_LOGI(TAG, "添加命令词 [%d]: %s (%s)",
-                 cmd->command_id, cmd->description, cmd->pinyin);
-
-        // 添加命令词
-        esp_err_t ret_cmd = esp_mn_commands_add(cmd->command_id, cmd->pinyin);
-        if (ret_cmd == ESP_OK)
-        {
-            success_count++;
-            ESP_LOGI(TAG, "✓ 命令词 [%d] 添加成功", cmd->command_id);
-        }
-        else
-        {
-            fail_count++;
-            ESP_LOGE(TAG, "✗ 命令词 [%d] 添加失败: %s",
-                     cmd->command_id, esp_err_to_name(ret_cmd));
-        }
-    }
-
-    // 更新命令词到模型
-    ESP_LOGI(TAG, "更新命令词到模型...");
-    esp_mn_error_t *error_phrases = esp_mn_commands_update();
-    if (error_phrases != NULL && error_phrases->num > 0)
-    {
-        ESP_LOGW(TAG, "有 %d 个命令词更新失败:", error_phrases->num);
-        for (int i = 0; i < error_phrases->num; i++)
-        {
-            ESP_LOGW(TAG, "  失败命令 %d: %s",
-                     error_phrases->phrases[i]->command_id,
-                     error_phrases->phrases[i]->string);
-        }
-    }
-
-    // 打印配置结果
-    ESP_LOGI(TAG, "命令词配置完成: 成功 %d 个, 失败 %d 个", success_count, fail_count);
-
-    // 打印激活的命令词
-    ESP_LOGI(TAG, "当前激活的命令词列表:");
-    multinet->print_active_speech_commands(mn_model_data);
-
-    // 打印支持的命令列表
-    ESP_LOGI(TAG, "支持的语音命令:");
-    for (int i = 0; i < CUSTOM_COMMANDS_COUNT; i++)
-    {
-        const command_config_t *cmd = &custom_commands[i];
-        ESP_LOGI(TAG, "  ID=%d: '%s'", cmd->command_id, cmd->description);
-    }
-
-    return (fail_count == 0) ? ESP_OK : ESP_FAIL;
-}
-
-/**
- * @brief 获取命令词的中文描述
- *
- * @param command_id 命令ID
- * @return const char* 命令的中文描述，如果未找到返回"未知命令"
- */
-static const char *get_command_description(int command_id)
-{
-    for (int i = 0; i < CUSTOM_COMMANDS_COUNT; i++)
-    {
-        if (custom_commands[i].command_id == command_id)
-        {
-            return custom_commands[i].description;
-        }
-    }
-    return "未知命令";
-}
 
 /**
  * @brief 执行退出逻辑
  *
- * 播放再见音频并返回等待唤醒状态
+ * 返回等待唤醒状态
  */
 static void execute_exit_logic(void)
 {
-    // 播放再见音频
-    ESP_LOGI(TAG, "播放再见音频...");
-    esp_err_t audio_ret = bsp_play_audio(byebye, byebye_len);
-    if (audio_ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "✓ 再见音频播放成功");
-    }
-    else
-    {
-        ESP_LOGE(TAG, "再见音频播放失败: %s", esp_err_to_name(audio_ret));
-    }
-
     current_state = STATE_WAITING_WAKEUP;
     ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
 }
@@ -269,6 +119,12 @@ extern "C" void app_main(void)
 {
     // ========== 第一步：初始化外接LED ==========
     init_led();
+
+    // ========== 第二步：初始化命令管理器 ==========
+    ESP_LOGI(TAG, "正在初始化命令管理器...");
+    CommandManager* cmd_manager = CommandManager::get_instance();
+    cmd_manager->initialize();
+    ESP_LOGI(TAG, "✓ 命令管理器初始化完成");
 
     // ========== 第二步：初始化INMP441麦克风硬件 ==========
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
@@ -409,7 +265,7 @@ extern "C" void app_main(void)
 
     // 配置自定义命令词
     ESP_LOGI(TAG, "正在配置命令词...");
-    esp_err_t cmd_config_ret = configure_custom_commands(multinet, mn_model_data);
+    esp_err_t cmd_config_ret = cmd_manager->configure_commands(multinet, mn_model_data);
     if (cmd_config_ret != ESP_OK)
     {
         ESP_LOGE(TAG, "命令词配置失败");
@@ -499,45 +355,28 @@ extern "C" void app_main(void)
                     int command_id = mn_result->command_id[0];
                     float prob = mn_result->prob[0];
 
-                    const char *cmd_desc = get_command_description(command_id);
+                    const char *cmd_desc = cmd_manager->get_command_description(command_id);
                     ESP_LOGI(TAG, "🎯 检测到命令词: ID=%d, 置信度=%.2f, 内容=%s, 命令='%s'",
                              command_id, prob, mn_result->string, cmd_desc);
 
-                    // 处理具体命令
-                    if (command_id == COMMAND_TURN_ON_LIGHT)
-                    {
-                        ESP_LOGI(TAG, "💡 执行开灯命令");
-                        led_turn_on();
+                    // 执行命令
+                    command_result_t result = cmd_manager->execute_command(command_id);
 
-                        // 播放开灯确认音频
-                        esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 开灯确认音频播放成功");
-                        }
-                    }
-                    else if (command_id == COMMAND_TURN_OFF_LIGHT)
+                    if (result == COMMAND_RESULT_EXIT_REQUESTED)
                     {
-                        ESP_LOGI(TAG, "💡 执行关灯命令");
-                        led_turn_off();
-
-                        // 播放关灯确认音频
-                        esp_err_t audio_ret = bsp_play_audio(light_off, light_off_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 关灯确认音频播放成功");
-                        }
-                    }
-                    else if (command_id == COMMAND_BYE_BYE)
-                    {
-                        ESP_LOGI(TAG, "👋 检测到拜拜命令，立即退出");
+                        ESP_LOGI(TAG, "� 检测到拜拜命令，立即退出");
                         execute_exit_logic();
                         continue; // 跳过后续的超时重置逻辑，直接进入下一次循环
                     }
-                    else
+                    else if (result == COMMAND_RESULT_NOT_FOUND)
                     {
                         ESP_LOGW(TAG, "⚠️  未知命令ID: %d", command_id);
                     }
+                    else if (result == COMMAND_RESULT_EXECUTE_FAILED)
+                    {
+                        ESP_LOGE(TAG, "❌ 命令执行失败: ID=%d", command_id);
+                    }
+                    // COMMAND_RESULT_SUCCESS 情况下不需要额外处理
                 }
 
                 // 命令处理完成，重新开始5秒倒计时，继续等待下一个命令
